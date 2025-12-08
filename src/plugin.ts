@@ -1,26 +1,38 @@
 import { Octokit } from "@octokit/rest";
 import { Env, PluginInputs } from "./types";
 import { Context } from "./types";
-import { isIssueCommentEvent } from "./types/typeguards";
-import { helloWorld } from "./handlers/hello-world";
 import { LogLevel, Logs } from "@ubiquity-dao/ubiquibot-logger";
+import { gasSubsidize } from "./handlers/gas-subsidize";
+import { isIssueClosedEvent } from "./types/typeguards";
+import { createAdapters } from "./adapters";
+import { createClient } from "@supabase/supabase-js";
+import { logAndComment } from "./utils/logger";
 
-/**
- * The main plugin function. Split for easier testing.
- */
 export async function runPlugin(context: Context) {
   const { logger, eventName } = context;
 
-  if (isIssueCommentEvent(context)) {
-    return await helloWorld(context);
+  if (isIssueClosedEvent(context)) {
+    const txs = await gasSubsidize(context);
+
+    if (!txs) {
+      logger.info("No gas subsidy transactions were sent.");
+      return;
+    }
+
+    const comment = `
+    ${Object.entries(txs).forEach(([user, tx]) => {
+      if (!tx) return;
+      let cmt = `Gas subsidy sent to ${user}:\n`;
+      cmt += `- [\`${tx.transactionHash.slice(0, 8)}\`](https://blockscan.com/tx/${tx.transactionHash})\n`;
+    })}`;
+
+    await logAndComment(context, "info", comment, { txs });
+    return txs;
   }
 
-  logger.error(`Unsupported event: ${eventName}`);
+  logger.info(`Ignoring event ${eventName}`);
 }
 
-/**
- * How a worker executes the plugin.
- */
 export async function plugin(inputs: PluginInputs, env: Env) {
   const octokit = new Octokit({ auth: inputs.authToken });
 
@@ -31,18 +43,10 @@ export async function plugin(inputs: PluginInputs, env: Env) {
     octokit,
     env,
     logger: new Logs("info" as LogLevel),
+    adapters: {} as ReturnType<typeof createAdapters>,
   };
 
-  /**
-   * NOTICE: Consider non-database storage solutions unless necessary
-   *
-   * Initialize storage adapters here. For example, to use Supabase:
-   *
-   * import { createClient } from "@supabase/supabase-js";
-   *
-   * const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_KEY);
-   * context.adapters = createAdapters(supabase, context);
-   */
+  context.adapters = createAdapters(createClient(env.SUPABASE_URL, env.SUPABASE_KEY), context);
 
   return runPlugin(context);
 }

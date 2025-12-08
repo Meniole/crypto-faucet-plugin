@@ -18,11 +18,14 @@ export default {
   owner: "ubiquity",
   number: 1,
   repository_url: "https://github.com/ubiquity/test-repo",
-  state: "open",
+  state: "closed",
   title: "issue",
   updated_at: "",
+  state_reason: "completed",
   url: "",
-  user: null,
+  user: {
+    login: "ubiquity",
+  },
   repo: "test-repo",
   labels: [
     {
@@ -37,7 +40,7 @@ export default {
   ],
   body: "body",
   assignee: {
-    login: "",
+    login: "keyrxng",
     avatar_url: "",
     email: "undefined",
     events_url: "",

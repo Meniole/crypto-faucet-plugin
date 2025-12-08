@@ -11,19 +11,32 @@ export interface PluginInputs<T extends SupportedEventsU = SupportedEventsU, TU 
   ref: string;
 }
 
-/**
- * This should contain the properties of the bot config
- * that are required for the plugin to function.
- *
- * The kernel will extract those and pass them to the plugin,
- * which are built into the context object from setup().
- */
-export const pluginSettingsSchema = T.Object(
-  {
-    configurableResponse: T.String(),
-  },
-  { default: { configurableResponse: "Hello, world!" } }
-);
+export type Args = {
+  recipient: string;
+  networkId: string;
+  amount: bigint;
+};
+
+export const pluginSettingsSchema = T.Object({
+  /**
+   * The private key of the EOA which holds the funds and
+   * acts as a "faucet". This wallet should be only be used
+   * for this purpose and should be protected.
+   */
+  fundingWalletPrivateKey: T.String({ pattern: "^0x[a-fA-F0-9]{64}$", minLength: 66, maxLength: 66 }),
+  /**
+   * The networkIds that the faucet should support. Meaning any network
+   * listed here should contain enough funds at the `fundingWalletPrivateKey`
+   * address on that network.
+   */
+  networkId: T.Transform(T.Number({ minimum: 1 }))
+    .Decode((v) => v.toString())
+    .Encode((v) => parseInt(v)),
+  /**
+   * The native gas token amount to be sent to the user.
+   */
+  gasSubsidyAmount: T.BigInt({ minimum: BigInt(0) }),
+});
 
 export const pluginSettingsValidator = new StandardValidator(pluginSettingsSchema);
 
