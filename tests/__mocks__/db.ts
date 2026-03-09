@@ -27,13 +27,17 @@ export const db = factory({
     comments_url: String,
     events_url: String,
     labels_url: String,
+    state_reason: String,
     locked: Boolean,
     node_id: String,
     title: String,
     number: Number,
     updated_at: Date,
     url: String,
-    user: nullable(Object),
+    user: {
+      login: String,
+      id: Number,
+    },
     milestone: nullable(Object),
     assignee: nullable({
       avatar_url: String,

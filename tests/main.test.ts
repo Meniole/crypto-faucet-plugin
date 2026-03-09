@@ -5,15 +5,45 @@ import { expect, describe, beforeAll, beforeEach, afterAll, afterEach, it } from
 import { Context } from "../src/types/context";
 import { Octokit } from "@octokit/rest";
 import { STRINGS } from "./__mocks__/strings";
-import { createComment, setupTests } from "./__mocks__/helpers";
+import { setupTests } from "./__mocks__/helpers";
 import manifest from "../manifest.json";
 import dotenv from "dotenv";
 import { Logs } from "@ubiquity-dao/ubiquibot-logger";
-import { Env } from "../src/types";
 import { runPlugin } from "../src/plugin";
+import { RPCHandler } from "@ubiquity-dao/rpc-handler";
+import { ethers } from "ethers";
+import { createAdapters } from "../src/adapters";
+import { createClient } from "@supabase/supabase-js";
+
+import usersGet from "./__mocks__/users-get.json";
 
 dotenv.config();
 jest.requireActual("@octokit/rest");
+jest.mock("@ubiquity-dao/rpc-handler");
+
+const mockRpcHandler = {
+  getFastestRpcProvider: jest.fn().mockResolvedValue(new ethers.providers.JsonRpcProvider("http://localhost:8545")),
+};
+
+(RPCHandler as unknown as jest.Mock).mockImplementation(() => mockRpcHandler);
+
+/**
+ * This cannot be an anvil address because their balance is > 0
+ * and would fail the balance checks and would not receive the gas subsidy
+ */
+const MOCK_ADDRESS = "0x3359ac996a9ED1aD61278D090Deee71d4Db359f9";
+
+let supabaseMock = {
+  getWalletByUserId: jest.fn().mockResolvedValue(MOCK_ADDRESS),
+  hasClaimedBefore: jest.fn().mockResolvedValue(false),
+};
+
+jest.mock("../src/adapters/supabase/helpers/user", () => {
+  return {
+    User: jest.fn().mockImplementation(() => supabaseMock),
+  };
+});
+
 const octokit = new Octokit();
 
 beforeAll(() => {
@@ -21,94 +51,91 @@ beforeAll(() => {
 });
 afterEach(() => {
   server.resetHandlers();
-  jest.clearAllMocks();
 });
 afterAll(() => server.close());
 
-describe("Plugin tests", () => {
-  beforeEach(async () => {
-    drop(db);
-    await setupTests();
-  });
+beforeEach(async () => {
+  jest.resetModules();
+  jest.clearAllMocks();
+  drop(db);
+  await setupTests();
+});
 
+describe("Plugin tests", () => {
   it("Should serve the manifest file", async () => {
     const worker = (await import("../src/worker")).default;
-    const response = await worker.fetch(new Request("http://localhost/manifest.json"), {});
+    const response = await worker.fetch(new Request("http://localhost/manifest.json"), {
+      SUPABASE_KEY: "",
+      SUPABASE_URL: "",
+    });
     const content = await response.json();
     expect(content).toEqual(manifest);
   });
 
-  it("Should handle an issue comment event", async () => {
-    const { context, infoSpy, errorSpy, debugSpy, okSpy, verboseSpy } = createContext();
-
-    expect(context.eventName).toBe("issue_comment.created");
-    expect(context.payload.comment.body).toBe("/Hello");
-
-    await runPlugin(context);
-
-    expect(errorSpy).not.toHaveBeenCalled();
-    expect(debugSpy).toHaveBeenNthCalledWith(1, STRINGS.EXECUTING_HELLO_WORLD, {
-      caller: STRINGS.CALLER_LOGS_ANON,
-      sender: STRINGS.USER_1,
-      repo: STRINGS.TEST_REPO,
-      issueNumber: 1,
-      owner: STRINGS.USER_1,
-    });
-    expect(infoSpy).toHaveBeenNthCalledWith(1, STRINGS.HELLO_WORLD);
-    expect(okSpy).toHaveBeenNthCalledWith(1, STRINGS.SUCCESSFULLY_CREATED_COMMENT);
-    expect(verboseSpy).toHaveBeenNthCalledWith(1, STRINGS.EXITING_HELLO_WORLD);
-  });
-
-  it("Should respond with `Hello, World!` in response to /Hello", async () => {
+  it("Should successfully distribute gas tokens", async () => {
     const { context } = createContext();
-    await runPlugin(context);
-    const comments = db.issueComments.getAll();
-    expect(comments.length).toBe(2);
-    expect(comments[1].body).toBe(STRINGS.HELLO_WORLD);
-  });
+    const result = await runPlugin(context);
+    const account = new ethers.Wallet(context.config.fundingWalletPrivateKey).address;
 
-  it("Should respond with `Hello, Code Reviewers` in response to /Hello", async () => {
-    const { context } = createContext(STRINGS.CONFIGURABLE_RESPONSE);
-    await runPlugin(context);
-    const comments = db.issueComments.getAll();
-    expect(comments.length).toBe(2);
-    expect(comments[1].body).toBe(STRINGS.CONFIGURABLE_RESPONSE);
-  });
+    expect(result).toBeDefined();
 
-  it("Should not respond to a comment that doesn't contain /Hello", async () => {
-    const { context, errorSpy } = createContext(STRINGS.CONFIGURABLE_RESPONSE, STRINGS.INVALID_COMMAND);
-    await runPlugin(context);
-    const comments = db.issueComments.getAll();
+    if (!result) {
+      throw new Error();
+    }
 
-    expect(comments.length).toBe(1);
-    expect(errorSpy).toHaveBeenNthCalledWith(1, STRINGS.INVALID_USE_OF_SLASH_COMMAND, { caller: STRINGS.CALLER_LOGS_ANON, body: STRINGS.INVALID_COMMAND });
-  });
+    const userOneTx = result[usersGet[0].login];
+    const userTwoTx = result[usersGet[1].login];
+
+    if (!userOneTx || !userTwoTx) {
+      throw new Error();
+    }
+
+    verifyTx(userOneTx);
+    verifyTx(userTwoTx);
+
+    expect(userOneTx.from).toEqual(account);
+    expect(userTwoTx.from).toEqual(account);
+  }, 30000);
 });
 
-/**
- * The heart of each test. This function creates a context object with the necessary data for the plugin to run.
- *
- * So long as everything is defined correctly in the db (see `./__mocks__/helpers.ts: setupTests()`),
- * this function should be able to handle any event type and the conditions that come with it.
- *
- * Refactor according to your needs.
- */
-function createContext(
-  configurableResponse: string = "Hello, world!", // we pass the plugin configurable items here
-  commentBody: string = "/Hello",
-  repoId: number = 1,
-  payloadSenderId: number = 1,
-  commentId: number = 1,
-  issueOne: number = 1
-) {
+describe("", () => {
+  beforeEach(() => {
+    supabaseMock = {
+      getWalletByUserId: jest.fn().mockResolvedValue(MOCK_ADDRESS),
+      hasClaimedBefore: jest.fn().mockResolvedValue(true),
+    };
+  });
+
+  it("Should not distribute if a permit exists in the DB for the user", async () => {
+    const { context } = createContext(1, 1, 2);
+    const result = await runPlugin(context);
+    expect(result).toBeDefined();
+
+    if (!result) {
+      throw new Error();
+    }
+
+    expect(result).toEqual({});
+  }, 30000);
+});
+
+function verifyTx(tx: ethers.providers.TransactionReceipt) {
+  expect(tx).toHaveProperty("status", 1);
+  expect(tx).toHaveProperty("from", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+  expect(tx).toHaveProperty("to", MOCK_ADDRESS);
+  expect(tx).toHaveProperty("transactionHash");
+  const txHash = tx.transactionHash;
+  expect(txHash).toBeDefined();
+  expect(txHash).toHaveLength(66);
+  expect(txHash).not.toEqual("0x" + "0".repeat(64));
+}
+
+function createContext(repoId: number = 1, payloadSenderId: number = 1, issueOne: number = 1) {
   const repo = db.repo.findFirst({ where: { id: { equals: repoId } } }) as unknown as Context["payload"]["repository"];
   const sender = db.users.findFirst({ where: { id: { equals: payloadSenderId } } }) as unknown as Context["payload"]["sender"];
   const issue1 = db.issue.findFirst({ where: { id: { equals: issueOne } } }) as unknown as Context["payload"]["issue"];
 
-  createComment(commentBody, commentId); // create it first then pull it from the DB and feed it to _createContext
-  const comment = db.issueComments.findFirst({ where: { id: { equals: commentId } } }) as unknown as Context["payload"]["comment"];
-
-  const context = createContextInner(repo, sender, issue1, comment, configurableResponse);
+  const context = createContextInner(repo, sender, issue1);
   const infoSpy = jest.spyOn(context.logger, "info");
   const errorSpy = jest.spyOn(context.logger, "error");
   const debugSpy = jest.spyOn(context.logger, "debug");
@@ -127,34 +154,32 @@ function createContext(
   };
 }
 
-/**
- * Creates the context object central to the plugin.
- *
- * This should represent the active `SupportedEvents` payload for any given event.
- */
-function createContextInner(
-  repo: Context["payload"]["repository"],
-  sender: Context["payload"]["sender"],
-  issue: Context["payload"]["issue"],
-  comment: Context["payload"]["comment"],
-  configurableResponse: string
-): Context {
-  return {
-    eventName: "issue_comment.created",
+function createContextInner(repo: Context["payload"]["repository"], sender: Context["payload"]["sender"], issue: Context["payload"]["issue"]) {
+  const ctx: Context = {
+    eventName: "issues.closed",
     payload: {
-      action: "created",
+      action: "closed",
       sender: sender,
       repository: repo,
       issue: issue,
-      comment: comment,
       installation: { id: 1 } as Context["payload"]["installation"],
-      organization: { login: STRINGS.USER_1 } as Context["payload"]["organization"],
-    },
+      organization: { login: STRINGS.UBIQUITY } as Context["payload"]["organization"],
+    } as Context["payload"],
     logger: new Logs("debug"),
     config: {
-      configurableResponse,
+      fundingWalletPrivateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+      networkId: "1337",
+      gasSubsidyAmount: BigInt(1e18),
     },
-    env: {} as Env,
+    env: {
+      SUPABASE_KEY: "test",
+      SUPABASE_URL: "test",
+    },
     octokit: octokit,
+    adapters: {} as ReturnType<typeof createAdapters>,
   };
+
+  ctx.adapters = createAdapters(createClient("http://localhost:8545", "test"), ctx);
+
+  return ctx;
 }
